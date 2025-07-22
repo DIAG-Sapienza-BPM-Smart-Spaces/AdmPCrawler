@@ -1,0 +1,101 @@
+
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Alignment
+import re
+
+from rapidfuzz import fuzz
+
+def raggruppa_procedimenti_simili(lista_procedimenti, soglia=90):
+    mappa = {}
+    gruppi = []
+
+    for proc in lista_procedimenti:
+        trovato = False
+        for gruppo in gruppi:
+            if fuzz.ratio(proc, gruppo[0]) >= soglia:
+                gruppo.append(proc)
+                mappa[proc] = gruppo[0]  
+                trovato = True
+                break
+        if not trovato:
+            gruppi.append([proc])
+            mappa[proc] = proc  
+
+    return mappa
+
+
+def pulisci_procedimento(testo):
+    if pd.isna(testo):
+        return ""
+    testo = str(testo)
+    testo = testo.replace("\\n", " ").replace("\\t", " ").replace("\\r", " ")
+    testo = testo.replace("\n", " ").replace("\t", " ").replace("\r", " ")
+    testo = testo.strip()
+    testo = re.sub(r"\s+", " ", testo)
+    return testo
+
+
+def esporta_excel_merge(input_csv, output_excel):
+
+    try:
+        input_csv="C:\\Users\\39345\\Desktop\\tabella_finale.csv"
+        df = pd.read_csv(input_csv)
+        print(f" File CSV caricato: {len(df)} righe")
+
+
+
+        df = df.rename(columns={"Nome Attività": "Procedimento"})
+        df["Procedimento"] = df["Procedimento"].apply(pulisci_procedimento)
+
+        procedimenti_unici = df["Procedimento"].unique().tolist()
+        mappa_simili = raggruppa_procedimenti_simili(procedimenti_unici)
+        df["Procedimento"] = df["Procedimento"].map(mappa_simili)
+
+
+
+        
+        df = df[["Procedimento", "Descrizione", "Normativa", "Comune"]]
+        df = df.sort_values(by=["Procedimento", "Comune"]).reset_index(drop=True)
+
+        # file Excel
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Procedimenti"
+        ws.append(df.columns.tolist())
+
+        for row in dataframe_to_rows(df, index=False, header=False):
+            ws.append(row)
+
+
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+        # Unione celle "Procedimento"  e "Descrizione" 
+        current_proc = None
+        start_row = 2
+
+        for row in range(2, ws.max_row + 1):
+            proc = ws.cell(row=row, column=1).value
+            if proc != current_proc:
+                if current_proc is not None and row - start_row > 1:
+                    ws.merge_cells(start_row=start_row, start_column=1, end_row=row-1, end_column=1)  
+                    ws.merge_cells(start_row=start_row, start_column=2, end_row=row-1, end_column=2)  
+                current_proc = proc
+                start_row = row
+
+        
+        if ws.max_row - start_row >= 1:
+            ws.merge_cells(start_row=start_row, start_column=1, end_row=ws.max_row, end_column=1)
+            ws.merge_cells(start_row=start_row, start_column=2, end_row=ws.max_row, end_column=2)
+
+        wb.save(output_excel)
+        print(f"File Excel salvato correttamente in: {output_excel}")
+
+    except Exception as e:
+        print(" Errore:", e)
+
+# ESECUZIONE
+esporta_excel_merge("prova_tab.csv", "procedimenti_merge.xlsx")
