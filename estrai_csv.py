@@ -1,163 +1,325 @@
+ #questo funziona lòaprima parte
+import asyncio
 import pandas as pd
+import json
 import os
 import re
-import asyncio
-from urllib.parse import urljoin
 from playwright.async_api import async_playwright
 from openai import OpenAI
 
+# === CONFIG ===
 
-CSV_INPUT = "C:\\Users\\39345\\Desktop\\estrai_csv\\prove_link.csv"
-OUTPUT_DIR = "norme_csv_procedimenti"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+CSV_INPUT = "C:\\Users\\39345\\Desktop\\norme_link.csv"
+#CSV_INPUT = "C:\\Users\\39345\\Desktop\\tabella_finale_firenze_with_links.csv"
+CSV_OUTPUT_FOLDER = "C:\\Users\\39345\\Desktop\\estrai_csv\\output_norme\\"
+os.makedirs(CSV_OUTPUT_FOLDER, exist_ok=True)
+
 
 client = OpenAI(api_key="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")
 
-pattern_azione = re.compile(
-    r"(presentare|richiedere|allegare|inoltrare|effettuare|"
-    r"compilare|consegnare|trasmettere|accompagnata|inviare|"
-    r"dimostrare|sottoscrivere|iscriversi|effettuata|ottenere|"
-    r"produrre|autenticare|depositare|fornire|ritirare|firmare|"
-    r"partecipare|essere tenuto a|\u00e8 necessario|\u00e8 richiesto|"
-    r"viene.*presentata|deve.*essere|si.*provvede.*a)",
-    re.IGNORECASE
-)
 
-pattern_da_pulire = re.compile(
-    r"(art\\.?\\s*\\d+[^\\w]*)|"
-    r"(articolo\\s*\\d+)|"
-    r"(legge\\s*n\\.?\\s*\\d+/?\\d*)|"
-    r"(d\\.?lgs\\.?\\s*\\d+/?\\d*)|"
-    r"(^\\s*\\d+[\\.)]\\s*)|"
-    r"(^\\s*[a-z]\)\s*)",
-    re.IGNORECASE
-)
 
-async def estrai_testo_dal_dom(page):
-    try:
-        contenuto = await page.locator("main, #main-content, article, .content, body").inner_text()
-        return contenuto.strip()
-    except:
-        return ""
 
-def estrai_frasi_procedurali_con_llm(testo):
-    if len(testo.strip()) < 200:
-        return []
+def genera_prompt_etichettatura(indice_text):
+    return f"""
+Contesto:
+Hai ricevuto l'indice di un atto normativo. Ogni riga rappresenta un titolo o articolo, con il relativo numero e descrizione. Il tuo compito è identificare quali voci, in base al titolo, potrebbero descrivere un procedimento amministrativo.
 
-    frasi = re.split(r'(?<=[\.!?])\s+', testo)
-    frasi_candidati = []
-    for frase in frasi:
-        if pattern_azione.search(frase) and len(frase.split()) >= 5:
-            frase_pulita = pattern_da_pulire.sub("", frase).strip()
-            frasi_candidati.append(frase_pulita)
+Obiettivo:
+Restituire una lista di articoli che secondo te contengono o introducono un procedimento, escludendo quelli introduttivi o definitori.
 
-    if not frasi_candidati:
-        return []
+Input:
+{indice_text}
 
-    joined = "\n".join(f"- {f}" for f in frasi_candidati[:20])
-    prompt = f"""
-Le seguenti frasi sono tratte da articoli di legge o regolamento. Seleziona solo quelle che descrivono azioni o adempimenti da parte di cittadini o imprese nell'ambito di un procedimento amministrativo (es. fare una domanda, ottenere un'autorizzazione, allegare documenti, partecipare a un bando). Indica anche se è presente un termine temporale (es. \"entro 30 giorni\", \"non oltre il termine di scadenza\"). Non duplicare le frasi, riporta ogni frase una sola volta.
+Output:
+- Una lista contenente i numeri e i titoli degli articoli che, secondo la tua analisi, includono la descrizione di una ***procedura amministrativa*** (cioè una sequenza operativa, attività regolata, fasi autorizzative, passaggi tecnici o provvedimenti amministrativi).
+- L’output deve indicare accanto a ogni titolo: → [procedura] oppure → [no]
+- Se alcuni articoli non sembrano contenere una procedura, etichettali come [no].
 
-Esempi validi:
-- Presentare istanza di autorizzazione entro 30 giorni
-- Allegare i documenti richiesti
-- Compilare il modulo disponibile
-- Richiedere la certificazione sanitaria
-- Partecipare al bando entro i termini stabiliti
-- Consegnare copia conforme del contratto
-- Effettuare il pagamento entro 10 giorni dalla notifica
-- Depositare la domanda presso l’ufficio competente
+Parole chiave indicative di procedura:
+- procedimento, procedura, istanza, domanda, presentazione
+- rilascio, concessione, autorizzazione, permesso
+- controllo, verifica, ispezione, accertamento
+- affidamento, aggiudicazione, indizione, gara
+- comunicazione, notifica, pubblicazione
+- catalogazione, conservazione, approvazione
+- conferenza di servizi, ricorso, contributo, valutazione
+- espropriazione, premiazione, dichiarazione, trasferimento
 
-Frasi:
-{joined}
+Parole da escludere (non procedurali):
+- definizione, oggetto, ambito, finalità, principio
+- disposizioni generali, norme transitorie, abrogazione, beni culturali
+- funzioni, valori, patrimonio, ambiti di applicazione
 
-Rispondi con un elenco puntato delle sole frasi procedurali, identiche a quelle fornite, senza modificarle e senza aggiungere spiegazioni.
+Approccio step-by-step:
+1. Leggi l’indice riga per riga.
+2. Per ogni riga, valuta solo il titolo dell’articolo.
+3. Se il titolo suggerisce uno dei temi elencati nelle parole chiave procedurali, etichettalo come → [procedura].
+4. Se il titolo è introduttivo, definitorio o descrive solo principi astratti, etichettalo come → [no].
+5. Restituisci la lista nel formato indicato: numero, titolo, etichetta.
+
+Vincoli:
+- Rispondi solo con testo etichettato, una riga per articolo.
+- Non aggiungere commenti, spiegazioni o testo aggiuntivo.
+- L’output deve essere leggibile e parsabile da un sistema automatico.
+
+Audience:
+Questo output verrà usato da un sistema di crawling automatico che seleziona solo gli articoli ritenuti “procedurali” per essere analizzati in dettaglio da un secondo modello.
 """
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-    )
-    output = response.choices[0].message.content
-    frasi_valide = list(set([line.strip("-• ").strip() for line in output.splitlines() if line.strip()]))
-    return frasi_valide
 
-async def analizza_norma(page, url, index):
-    print(f"Analizzo: {url}")
-    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(2000)
 
-    articoli_links = []
 
-    try:
-        await page.wait_for_selector("a")
-        anchors = await page.locator("a").all()
-        for a in anchors:
-            try:
-                text = (await a.inner_text()).strip().lower()
-                href = await a.get_attribute("href")
-                if (
-                    href and
-                    not href.startswith("javascript:") and
-                    not href.endswith(".pdf") and
-                    ("art" in text or re.search(r"\b(articolo|capo|sezione|\d{1,3})\b", text))
-                ):
-                    full_url = urljoin(url, href)
-                    if full_url not in articoli_links:
-                        articoli_links.append(full_url)
-                        #print(f" Link articolo trovato: {text} -> {full_url}")
-            except:
-                continue
-    except Exception as e:
-        print(f"Errore durante raccolta articoli: {e}")
+def debug_pulisci_testo_normativo(testo_completo):
+    
+    pattern_articolo = r"(Art(?:icolo)?\.?\s+\d+[^\n]*)\n"
+    matches = list(re.finditer(pattern_articolo, testo_completo))
 
-    if not articoli_links:
-        print(" Nessun link articolo trovato.")
-        return
+    if not matches:
+        return []
 
-    #print(f"Articoli trovati: {len(articoli_links)}")
-    frasi_finali = []
+    articoli = []
+    for i, match in enumerate(matches):
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(testo_completo)
+        titolo = match.group(1).strip()
+        testo_raw = testo_completo[start:end].strip()
+        
 
-    for i, link in enumerate(articoli_links):
+
+        
+        righe = testo_raw.splitlines()
+        righe_utili = []
+
+        parole_ban = [
+            "aggiornamenti all'atto", "atti aggiornati", "atti correlati", "note atto",
+            "indice dell'atto", "torna su", "collegamenti veloci", "archivio news",
+            "gazzetta ufficiale", "presidenza del consiglio", "camera dei deputati",
+            "senato della repubblica", "istituto poligrafico", "esporta", "akoma ntoso",
+            "motore federato", "leggi approvate", "progetto", "note legali", "nascondi", "articolo precedente",
+            "articolo successivo", "cookie policy", "contattaci", "normattiva", "note legali"
+        ]
+
+        for riga in righe:
+            riga_clean = riga.strip().lower()
+            if any(p in riga_clean for p in parole_ban):
+                break  
+            if riga.strip():
+                righe_utili.append(riga.strip())
+
+        testo_pulito = "\n".join(righe_utili).strip()
+        
+
+        
+        if testo_pulito.lower().startswith(titolo.lower()):
+            testo_pulito = testo_pulito[len(titolo):].strip()
+
+        articoli.append({
+            "numero": titolo,
+            "testo": testo_pulito
+        })
+
+    return articoli
+
+def carica_articoli_procedurali_da_csv(url, cartella_output):
+    nome_file = url.split(";")[0].split(":")[-1].replace("/", "_")
+    path_csv = os.path.join(cartella_output, f"articoli_{nome_file}.csv")
+
+    if not os.path.exists(path_csv):
+        print(f"⚠️ File CSV articoli non trovato per {url}")
+        return []
+
+    df = pd.read_csv(path_csv)
+    if "numero" not in df.columns:
+        print(f" File {path_csv} non contiene la colonna 'numero'")
+        return []
+
+    articoli = df["numero"].dropna().astype(str).tolist()
+    return articoli
+
+async def clicca_articolo_da_sidebar(page, numero_articolo: str) -> bool:
+    print(f" Cerco e clicco articolo {numero_articolo}...")
+
+    numero_norm = numero_articolo.strip().lower()
+
+    # Trova TUTTI i link nella sidebar
+    links = await page.locator("a").all()
+
+    for link in links:
         try:
-            print(f"[{i+1}/{len(articoli_links)}] Apro articolo: {link}")
-            await page.goto(link, timeout=60000)
-            await page.wait_for_timeout(1000)
-            testo = await estrai_testo_dal_dom(page)
-            if len(testo.strip()) < 100:
+            testo = (await link.inner_text()).strip().lower()
+            testo_norm = re.sub(r"[^\dab]", "", testo) 
+
+            #normlizzazione del numero da cercare
+            numero_cercato = re.sub(r"[^\dab]", "", numero_norm)
+
+            if testo_norm == numero_cercato or testo_norm == f"art{numero_cercato}":
+                await link.click()
+                print(f"Cliccato articolo con testo: '{testo}'")
+                return True
+        except Exception:
+            continue
+
+    print(f" Articolo {numero_articolo} non cliccabile (match esatto fallito)")
+    return False
+
+def normalizza_articolo(s: str) -> str:
+    return re.sub(r"\W+", "", s.lower().replace("articolo", "").replace("art.", "").strip())
+
+
+
+async def process_norma(playwright, url):
+    browser = await playwright.chromium.launch()
+    page = await browser.new_page()
+    try:
+        print(f" Apro: {url}")
+        await page.goto(url, timeout=60000)
+        await page.wait_for_load_state("networkidle")
+        nome_file = url.split(";")[0].split(":")[-1].replace("/", "_")
+
+        
+        articoli_procedurali = []
+        indice_btn = page.locator("a", has_text="Indice dell'atto")
+        ha_indice = False
+
+        if await indice_btn.count() > 0:
+            try:
+                if await indice_btn.first.is_visible():
+                    await indice_btn.first.scroll_into_view_if_needed()
+                    await indice_btn.first.click(timeout=10000)
+                    await page.wait_for_timeout(1500)
+                    ha_indice = True
+                else:
+                    print(" Il bottone 'Indice dell’atto' è presente ma nascosto.")
+            except Exception as e:
+                print(f" Errore nel cliccare 'Indice dell’atto': {e}")
+
+        #  Analisi dell'indice con LLM
+        if ha_indice:
+            elementi = await page.query_selector_all("div.modal-body li")
+            righe_indice = []
+            for el in elementi:
+                link = await el.query_selector("a")
+                if not link:
+                    continue
+                numero = await link.inner_text()
+                full_text = await el.inner_text()
+                titolo = full_text.replace(numero, "", 1).strip(" -–:.\n\t")
+                if re.match(r"^\d+[ bis\-]*$", numero) and titolo:
+                    righe_indice.append(f"{numero} - {titolo}")
+
+            if not righe_indice:
+                print(" Nessun articolo trovato nell'indice.")
+                return
+
+            prompt = genera_prompt_etichettatura("\n".join(righe_indice))
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "Etichetta ogni articolo come [procedura] o [no]."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0
+            )
+            testo_risposta = response.choices[0].message.content.strip()
+            for riga in testo_risposta.split("\n"):
+                match = re.match(r"(\d+[ bis\-]*)\s*-\s*(.*?)\s*→\s*\[(procedura|no)\]", riga.strip())
+                if match:
+                    numero, _, etichetta = match.groups()
+                    if etichetta == "procedura":
+                        articoli_procedurali.append(numero.strip())
+
+            # Salva la lista degli articoli con procedure
+            if articoli_procedurali:
+                df = pd.DataFrame({"numero": articoli_procedurali})
+                path_csv = os.path.join(CSV_OUTPUT_FOLDER, f"articoli_{nome_file}.csv")
+                df.to_csv(path_csv, index=False, encoding="utf-8-sig")
+                print(f" Articoli procedurali salvati: {path_csv}")
+            else:
+                print(" Nessun articolo procedurale rilevato dal LLM.")
+
+        #  Clic sugli articoli 
+        articoli_estratti = []
+        articoli_visti = set()
+        for numero in articoli_procedurali:
+            # Normalizza numero 
+            numero_pulito = re.match(r"\d+[ ]?(bis)?", numero.strip().lower())
+            if not numero_pulito:
+                print(f" Numero articolo non valido: {numero}")
                 continue
-            frasi = estrai_frasi_procedurali_con_llm(testo)
-            frasi_finali.extend(frasi)
-        except Exception as e:
-            print(f"Errore articolo: {e}")
+            numero_pulito = numero_pulito.group()
 
-    frasi_finali = list(set(frasi_finali))
-    for frase in frasi_finali:
-        print(" -", frase)
+            print(f" Cerco e clicco articolo {numero_pulito}...")
 
-    nome_file = f"norma_{index+1}.csv"
-    path_csv = os.path.join(OUTPUT_DIR, nome_file)
-    df_out = pd.DataFrame({
-        "Frasi procedurali": frasi_finali or ["(nessuna frase rilevata)"]
-    })
-    df_out.to_csv(path_csv, index=False)
-    print(f"Salvato: {nome_file} ({len(frasi_finali)} frasi)")
+            if await clicca_articolo_da_sidebar(page, numero_pulito):
+                await page.wait_for_timeout(1500)
+                testo = await page.inner_text("body")
+                
+
+                articoli_puliti = debug_pulisci_testo_normativo(testo)
+
+                numero_norm = normalizza_articolo(numero_pulito)
+
+                trovati = []
+                for a in articoli_puliti:
+                    numero_blocco = normalizza_articolo(a["numero"])
+                    if numero_blocco.endswith(numero_norm) and a["numero"] not in articoli_visti:
+                        trovati.append(a)
+
+                if trovati:
+                    articoli_estratti.extend(trovati)
+                    articoli_visti.update(a["numero"] for a in trovati)
+                    print(f" Salvato articolo {numero_pulito} ({len(trovati)} blocchi puliti)")
+                else:
+                    print(f" Nessun blocco corrispondente al numero {numero_pulito}")
+
+
+
+        if articoli_estratti:
+            output_testi = os.path.join(CSV_OUTPUT_FOLDER, f"testi_cliccati_{nome_file}.csv")
+            pd.DataFrame(articoli_estratti).to_csv(output_testi, index=False, encoding="utf-8-sig")
+            print(f" Testi articoli cliccati salvati: {output_testi}")
+        else:
+            print(" Nessun articolo utile da salvare")
+
+        # Fallback se no indice o articoli cliccabili
+        if not ha_indice or (ha_indice and not articoli_procedurali):
+            print(" Nessun indice disponibile: provo ad analizzare il testo completo...")
+            text_body = await page.inner_text("body")
+            articoli = debug_pulisci_testo_normativo(text_body)
+            if articoli:
+                df = pd.DataFrame(articoli)
+                path_fallback = os.path.join(CSV_OUTPUT_FOLDER, f"testi_articoli_fallback_{nome_file}.csv")
+                df.to_csv(path_fallback, index=False, encoding="utf-8-sig")
+                print(f" Articoli estratti e puliti salvati: {path_fallback}")
+            else:
+                print(" Nessun articolo rilevato nel testo pulito.")
+
+    except Exception as e:
+        print(f" Errore su {url}: {e}")
+    finally:
+        await browser.close()
 
 async def main():
     df = pd.read_csv(CSV_INPUT)
+    urls = df["NormLink"].dropna().tolist()
+    urls = [u for u in urls if isinstance(u, str) and u.startswith("http")]
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
-
-        for index, row in df.iterrows():
-            url = row.get("Link normativa", "")
-            if isinstance(url, str) and url.startswith("http"):
-                await analizza_norma(page, url, index)
-
-        await browser.close()
+        for url in urls:
+            await process_norma(p, url)
 
 if __name__ == "__main__":
     asyncio.run(main())
 
+async def main():
+    df = pd.read_csv(CSV_INPUT)
+    urls = df["NormLink"].dropna().tolist()
+    
+    urls = [u for u in urls if isinstance(u, str) and u.startswith("http")]
+    async with async_playwright() as p:
+        for url in urls:
+            await process_norma(p, url)
+
+if __name__ == "__main__":
+    asyncio.run(main())
