@@ -7,6 +7,7 @@ import io
 import re
 import requests
 import fitz  
+import unicodedata
 import pandas as pd
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -21,17 +22,17 @@ from PIL import Image
 import pytesseract
 
 
-# OpenAI API Key
 client = OpenAI(api_key="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")
 
 
-COMUNI_FILE= "C:\\Users\\39345\\Desktop\\link_capoluoghi.txt"
+COMUNI_FILE = "C:\\Users\\39345\\Desktop\\TESI\\crawling\\prova_comuni.txt"
+#COMUNI_FILE= "C:\\Users\\39345\\Desktop\\link_capoluoghi.txt"
 df_comuni = pd.read_csv(COMUNI_FILE, header=None)
 COMUNI = df_comuni[0].dropna().astype(str).tolist()
 
 
 
-CSV_OUTPUT = os.path.expanduser("~/Desktop/tabella_finale.csv")
+CSV_OUTPUT = os.path.expanduser("~/Desktop/tabella_prova.csv")
 
 
 def normalizza_output(output):
@@ -53,7 +54,7 @@ def carica_parole_chiave(path):
     return set(parole)
 
 
-
+#KEYWORDS_PATH= "C:\\Users\\39345\\Desktop\\TESI\\prova_parole.txt"
 KEYWORDS_PATH = "C:\\Users\\39345\\Desktop\\TESI\\parole_solite.txt"
 PAROLE_CHIAVE = carica_parole_chiave(KEYWORDS_PATH)
 
@@ -80,7 +81,27 @@ def trova_link_regex(soup, pattern, url_base):
             return urljoin(url_base, a["href"])
     return None
 
+def trova_link_trasparenza_principale(soup, pattern, url_base):
+    candidati = []
 
+    for a in soup.find_all("a", href=True):
+        testo = a.get_text(strip=True)
+        href = a["href"]
+        if re.search(pattern, testo, flags=re.IGNORECASE):
+            full_url = urljoin(url_base, href)
+            candidati.append((testo.lower(), full_url))
+
+    
+    blacklist = ["rifiuti", "appalti", "tributi", "bilancio", "pago", "albo", "ecologia", "covid"]
+
+    for testo, url in candidati:
+        if not any(bl in url.lower() or bl in testo for bl in blacklist):
+            return url  
+
+    if candidati:
+        return candidati[0][1] 
+
+    return None
 
 
 def estrai_dettagli_con_llm(testi, batch_size=5): 
@@ -173,7 +194,7 @@ def estrai_descrizione_normativa(text):
         descrizioni, normative, riferimenti = estrai_dettagli_con_llm([text])
         return descrizioni[0], normative[0], riferimenti[0]
     except:
-        print("  Errore LLM, uso regex fallback.")
+        print(" Errore LLM, uso regex.")
         return estrai_fallback_regex(text)
 
 
@@ -198,7 +219,7 @@ def estrai_fallback_regex(text):
 
 
 esclusi = re.compile(
-    r"(#|facebook|fb\.com|linkedin|lnkd\.in|twitter|x\.com|instagram|whatsapp|youtube|tiktok|mailto|cookie|ServeAttachment|ServeBLOB|\.pdf|\.docx?|\.xlsx?|\.pptx?)",
+    r"(#|facebook|fb\.com|linkedin|lnkd\.in|twitter|x\.com|instagram|whatsapp|youtube|tiktok|mailto|cookie|ServeAttachment|ServeBLOB)",
     re.IGNORECASE
 )
 
@@ -224,10 +245,6 @@ def estrai_link_da_pdf(url_pdf):
 
 
 async def estrai_pdf_playwright(url):
-    """
-    Estrae i link ai PDF da una pagina usando Playwright.
-    Restituisce una lista di URL completi dei PDF trovati.
-    """
     pdf_links = []
     try:
         async with async_playwright() as p:
@@ -253,11 +270,7 @@ async def estrai_pdf_playwright(url):
 
 
 
-
 def estrai_testo_pdf_pymupdf(pdf_url):
-    """
-    Scarica il PDF da un URL e ritorna una lista di stringhe
-    """
     testo_righe = []
     try:
         
@@ -288,9 +301,6 @@ def estrai_testo_pdf_pymupdf(pdf_url):
 
 
 def scarica_pdf_requests(url, comune):
-    """
-    Scarica il PDF nella cartella procedimenti_pdf/NOME_COMUNE
-    """
     parsed = urlparse(url)
     referer = f"{parsed.scheme}://{parsed.netloc}"
 
@@ -333,9 +343,6 @@ def scarica_pdf_requests(url, comune):
 
 
 def estrai_blocchi_puliti_da_pdf(percorso_pdf):
-    """
-    Estrae blocchi di testo puliti da un PDF.
-    """
     blocchi = []
     try:
         doc = fitz.open(percorso_pdf)
@@ -362,12 +369,9 @@ def estrai_blocchi_puliti_da_pdf(percorso_pdf):
 
 
 def procedimenti_da_blocchi(blocchi, link_pdf, comune):
-    """
-    Converte una lista di blocchi di testo in una lista di dizionari di procedimenti.
-    """
+
     procedimenti = []
     for blocco in blocchi:
-        # Per Nome Attività prendi la prima riga significativa o una riga contenente "PROCEDIMENTO"
         nome_attivita = ""
         righe = blocco.splitlines()
         for r in righe:
@@ -377,9 +381,9 @@ def procedimenti_da_blocchi(blocchi, link_pdf, comune):
         if not nome_attivita:
             nome_attivita = righe[0].strip() if righe else "Procedimento"
 
-        # Normativa: prima riga con "art."
+        
         normativa = next((r for r in righe if "art." in r.lower()), "")
-        # Riferimento temporale: prima riga con "giorni"
+        
         riferimento = next((r for r in righe if "giorni" in r.lower()), "")
 
         procedimenti.append({
@@ -398,11 +402,6 @@ def procedimenti_da_blocchi(blocchi, link_pdf, comune):
 
 
 def estrai_procedimenti_con_fallback(url_pdf, comune):
-    """
-    Scarica un PDF da URL e prova prima l'estrazione testo,
-    poi l'OCR se necessario.
-    Restituisce una lista di procedimenti.
-    """
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -447,29 +446,29 @@ def estrai_procedimenti_con_fallback(url_pdf, comune):
     print(f" Estratti {len(procedimenti_ocr)} procedimenti con OCR.")
     return procedimenti_ocr
 
-def _estrai_blocchi_da_testo(testo, url_pdf, comune):
-    """
-    Segmenta in blocchi ogni volta che trova una riga che inizia con 'PROCEDIMENTO',
-    e passa ogni blocco all'LLM per estrarre descrizione, normativa e riferimenti.
-    """
-    righe = testo.splitlines()
-    procedimenti = []
-    blocco_corrente = []
-    nome_attivita_corrente = ""
 
-    for riga in righe:
-        riga_pulita = riga.strip()
-        if not riga_pulita:
+def _estrai_blocchi_da_testo(testo, url_pdf, comune):
+    procedimenti = []
+    parole_chiave = PAROLE_CHIAVE  
+    
+
+    
+    raw_blocchi = re.split(r"\n\s*\n", testo)
+
+    for raw_blocco in raw_blocchi:
+        blocco = " ".join([r.strip() for r in raw_blocco.splitlines() if r.strip()])
+        if not blocco:
             continue
 
-        # Nuovo procedimento se la riga inizia con PROCEDIMENTO
-        if riga_pulita.upper().startswith("PROCEDIMENTO"):
-            if blocco_corrente:
-                testo_blocco = " ".join(blocco_corrente)
-                descr, norma, ref = estrai_descrizione_normativa(testo_blocco[:2500])
+        # Verifica se il blocco contiene almeno una parola chiave
+        blocco_lower = blocco.lower()
+        if any(kw in blocco_lower for kw in parole_chiave):
+            descr, norma, ref = estrai_descrizione_normativa(blocco[:2500])
 
+
+            if descr.strip().upper() != "NESSUN PROCEDIMENTO":
                 procedimenti.append({
-                    "Nome Attività": nome_attivita_corrente,
+                    "Nome Attività": descr if descr else "Procedimento",
                     "Descrizione": descr,
                     "Normativa": norma,
                     "Riferimenti temporali": ref,
@@ -478,174 +477,646 @@ def _estrai_blocchi_da_testo(testo, url_pdf, comune):
                     "Comune": comune
                 })
 
-            nome_attivita_corrente = riga_pulita
-            blocco_corrente = []
-        else:
-            blocco_corrente.append(riga_pulita)
-
-    # Salva l'ultimo blocco
-    if nome_attivita_corrente and blocco_corrente:
-        testo_blocco = " ".join(blocco_corrente)
-        descr, norma, ref = estrai_descrizione_normativa(testo_blocco[:2500])
-
-        procedimenti.append({
-            "Nome Attività": nome_attivita_corrente,
-            "Descrizione": descr,
-            "Normativa": norma,
-            "Riferimenti temporali": ref,
-            "Output": "",
-            "Link": url_pdf,
-            "Comune": comune
-        })
-
-    print(f"Suddiviso in {len(procedimenti)} procedimenti.")
+    print(f" Suddiviso e filtrato in {len(procedimenti)} procedimenti tramite parole chiave.")
     return procedimenti
 
+async def fallback_playwright_trova_link_multipli(url, patterns):
 
+    print(f" Fallback Playwright: cerco link corrispondente a uno tra: {patterns}")
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(url, timeout=60000)
+            await page.wait_for_load_state("domcontentloaded")
+
+            anchors = await page.query_selector_all("a[href]")
+            for a in anchors:
+                try:
+                    testo = (await a.inner_text()).strip().lower()
+                    href = await a.get_attribute("href")
+                    if not href:
+                        continue
+
+                    for pattern in patterns:
+                        if re.search(pattern, testo, flags=re.IGNORECASE):
+                            full_url = urljoin(url, href)
+                            print(f" Trovato con Playwright: {full_url}")
+                            await browser.close()
+                            return full_url
+
+                except:
+                    continue
+
+            await browser.close()
+            print(" Nessun link trovato con Playwright.")
+    except Exception as e:
+        print(f" Errore Playwright fallback: {e}")
+
+    return None
+
+
+
+
+def _pagination_candidates(soup, base_url):
+    
+    seen = set()
+    out = []
+
+    keys_href = ["page=", "pagina=", "/page/", "/pagina/", "offset=", "start=", "PageNo=", "p="]
+    pat_arrow = re.compile(r"^\s*(»|>|›|»»|>>)\s*$")
+    pat_next = re.compile(r"(successiv|prossim|avanti|next|pagina|pag\.)", re.IGNORECASE)
+
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "")
+        txt = a.get_text(" ", strip=True)
+        rel = a.get("rel")
+
+        is_rel_next = False
+        if rel:
+            if isinstance(rel, list):
+                is_rel_next = any(str(r).lower() == "next" for r in rel)
+            else:
+                is_rel_next = "next" in str(rel).lower()
+
+        cond = (
+            is_rel_next
+            or any(k in href.lower() for k in keys_href)
+            or txt.isdigit()
+            or pat_arrow.search(txt)
+            or pat_next.search(txt)
+        )
+
+        if cond:
+            full = urljoin(base_url, href)
+            if full not in seen:
+                seen.add(full)
+                out.append(full)
+    return out
+
+
+async def iter_pagination(start_url, crawler, max_pages=50):
+    
+    root = urlparse(start_url).netloc
+    q = deque([start_url])
+    visited = set()
+
+    while q and len(visited) < max_pages:
+        url = q.popleft()
+        if url in visited:
+            continue
+        visited.add(url)
+
+        html = await crawler.arun(url, extraction_strategy=RegexExtractionStrategy(timeout=30000))
+        html = normalizza_output(html)
+        soup = BeautifulSoup(html["text"], "html.parser")
+
+        #print(f"[PAG] Analizzo: {url}")
+        yield url, soup
+
+        # raccogli i candidati alla "pagina successiva"
+        for cand in _pagination_candidates(soup, url):
+            if urlparse(cand).netloc == root and cand not in visited and cand not in q:
+                q.append(cand)
+
+# Pattern testo per riconoscere "sottosezioni" organizzative dove spesso sono i procedimenti
+PATTERN_SOTTOSEZIONI = re.compile(
+    r"\b("
+    r"catalogo|elenco\s+procediment[io]i|"
+    r"elenco\s+procediment[ia]\s+amministrativ[ia]"
+    r"settore(?:\s+[a-zà-ù]+){0,6}|"
+    r"dipartiment[oi](?:\s+[a-zà-ù]+){0,6}|"
+    r"area(?:\s+[a-zà-ù]+){0,6}|"
+    r"struttur[ea](?:\s+[a-zà-ù]+){0,6}|"
+    r"unit[aà]\s+organizzativa(?:\s+[a-zà-ù]+){0,6}|"
+    r"serviz[io]i?(?:\s+[a-zà-ù]+){0,6}|"
+    r"uffic[io]i?(?:\s+[a-zà-ù]+){0,6}"
+    r")\b",
+    re.IGNORECASE
+)
+
+
+PAROLE_STRONG = [
+    "procedimenti", "procedimento", "tipologie", "tipologia",
+    "attività e procedimenti", "attività", "schede", "scheda",
+    "modulistica", "moduli", "istanza", "domanda",
+    "uffici", "strutture", "servizi", "settori", "area", "aree",
+    "normativa", "regolamenti", "atti normativi",
+    # extra comuni
+    "procedimenti e servizi", "carta dei servizi", "trasparenza",
+    "amministrazione trasparente", "sportello", "urp", "servizi online"
+]
+
+
+FILE_EXTS = (".pdf", ".csv", ".xlsx", ".xls")
+
+def _dbg(msg): 
+    print(f"[SOTTOSEZIONI][DBG] {msg}")
+
+def _strip_accents_lower(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.lower().strip()
+
+def _same_section_relaxed(base, target):
+    """Consenti sottodomini dello stesso eTLD+1 (es. comune.tld e sub.comune.tld)."""
+    try:
+        bp, tp = urlparse(base), urlparse(target)
+        if not bp.hostname or not tp.hostname:
+            return False
+        base_host = ".".join(bp.hostname.split(".")[-2:])
+        targ_host = ".".join(tp.hostname.split(".")[-2:])
+        return base_host == targ_host
+    except Exception:
+        return False
+
+def _contains_keywords(text, parole_chiave, soglia=2):
+    t = _strip_accents_lower(text)
+    count = 0
+    for kw in parole_chiave:
+        k = _strip_accents_lower(kw)
+        if not k:
+            continue
+        # parola intera quando possibile
+        rx = re.compile(rf"\b{re.escape(k)}\b")
+        count += len(rx.findall(t))
+    return count >= soglia
+
+def _link_text_candidates(a):
+    """Ritorna testo combinato: innerText + title + aria-label, normalizzato."""
+    txt  = a.get_text(" ", strip=True) if a else ""
+    tit  = a.get("title", "")
+    aria = a.get("aria-label", "")
+    return _strip_accents_lower(" ".join([txt or "", tit or "", aria or ""]))
+
+
+
+async def crawl_sottosezioni_bfs(start_soup, start_url, crawler, parole_chiave, esclusi, max_depth=3, soglia_kw=2):
+    from collections import deque
+    
+    def _same_section(a, b): 
+        return _same_section_relaxed(a, b)
+
+    risultati = []
+    visitati = set()
+    q = deque()
+    q.append((start_url, start_soup, 0))
+    visitati.add(start_url)
+
+    while q:
+        page_url, soup, depth = q.popleft()
+        if depth > max_depth:
+            continue
+
+        
+        all_links = list(soup.find_all("a", href=True))
+        _dbg(f"URL={page_url} depth={depth} link_totali={len(all_links)}")
+
+        
+        file_links = [
+            urljoin(page_url, a["href"])
+            for a in all_links
+            if not esclusi.search(a["href"])
+               and a["href"].lower().endswith(FILE_EXTS)
+        ]
+        if file_links:
+            _dbg(f"FILE trovati: {len(file_links)}")
+            for u in file_links:
+                label = "PDF Procedimento" if u.lower().endswith(".pdf") else "File Procedimenti"
+                risultati.append((label, u))
+
+        
+        kw_links = []
+        for a in all_links:
+            href = a["href"]
+            if esclusi.search(href):
+                continue
+            testo_combo = _link_text_candidates(a)
+            if not testo_combo:
+                continue
+
+            
+            strong_hit = any(s in testo_combo for s in map(_strip_accents_lower, PAROLE_STRONG))
+            kw_hit     = any(_strip_accents_lower(kw) in testo_combo for kw in parole_chiave)
+
+            
+            href_low = _strip_accents_lower(href)
+            name_hit = any(_strip_accents_lower(kw) in href_low for kw in parole_chiave)
+
+            if (strong_hit and kw_hit) or name_hit:
+                full = urljoin(page_url, href)
+                if _same_section(start_url, full):
+                    titolo_vis = (a.get_text(" ", strip=True) or a.get("title") or a.get("aria-label") or "Link procedimento").strip()
+                    kw_links.append((titolo_vis, full))
+
+        if kw_links:
+            _dbg(f"KW link selezionati: {len(kw_links)}")
+            risultati.extend(kw_links)
+
+        
+        nuovi = []
+        for a in all_links:
+            if esclusi.search(a["href"]):
+                continue
+            testo = a.get_text(" ", strip=True) or ""
+            if not testo:
+                continue
+            if PATTERN_SOTTOSEZIONI.search(testo):
+                full = urljoin(page_url, a["href"])
+                if _same_section(start_url, full):
+                    nuovi.append(full)
+
+        _dbg(f"sottosezioni_cand={len(nuovi)}")
+
+        
+        for url_next in nuovi:
+            if url_next in visitati:
+                continue
+            visitati.add(url_next)
+            try:
+                html_n = await crawler.arun(url_next, extraction_strategy=RegexExtractionStrategy(timeout=35000))
+                html_n = normalizza_output(html_n)
+                testo_page = html_n.get("text") or ""
+                if not _contains_keywords(testo_page, parole_chiave, soglia=soglia_kw):
+                    _dbg(f"[SKIP] {url_next}: segnali insufficienti (kw < {soglia_kw}).")
+                    
+                    if not _contains_keywords(testo_page, parole_chiave, soglia=1):
+                        continue
+                soup_n = BeautifulSoup(testo_page, "html.parser")
+                q.append((url_next, soup_n, depth + 1))
+                _dbg(f"expand -> {url_next} (depth {depth+1})")
+            except Exception as e:
+                print(f"[SOTTOSEZIONI] errore su {url_next}: {e}")
+
+    
+    dedup = {}
+    for titolo, urlx in risultati:
+        dedup[urlx] = (titolo, urlx)
+
+    out = list(dedup.values())
+    _dbg(f"RISULTATI FINALI: {len(out)}")
+    return out
+
+
+
+
+
+def trova_inner_trasparenze_ordinate(soup, base_url):
+    """
+    Raccoglie TUTTI i link 'Amministrazione trasparente' presenti nella pagina
+    (bottoni, link testuali, ecc.), li normalizza su base_url e li ordina
+    dal più recente al meno recente in base all'anno (heuristic).
+    """
+    candidati = []
+    RX_TRASP = re.compile(
+        r"amministrazione\s+trasparent[ea].*|^\s*trasparenza\s*$|^\s*amministrazione\s*$",
+        re.IGNORECASE
+    )
+
+    for a in soup.find_all("a", href=True):
+        testo = a.get_text(" ", strip=True)
+        if RX_TRASP.search(testo):
+            candidati.append((testo, urljoin(base_url, a["href"])))
+
+    
+    visti = set()
+    unici = []
+    for t, u in candidati:
+        if u not in visti:
+            visti.add(u)
+            unici.append((t, u))
+
+    #
+    def score(item):
+        t, u = item
+        anni = re.findall(r"(20\d{2})", t + " " + u)
+        if anni:
+            try:
+                return max(int(x) for x in anni)
+            except:
+                return 0
+        
+        if re.search(r"\bdal\b", t, re.IGNORECASE): return 9999
+        if re.search(r"\bfino\s+al\b", t, re.IGNORECASE): return 1
+        return 0
+
+    unici.sort(key=score, reverse=True)
+    return [u for _, u in unici]
+
+
+
+def _trova_tipologie_inner_links(soup, base_url):
+    RX_TIP = re.compile(
+        r"tipolog(?:ia|ie)\s*(?:dei|de|di)?\s*procediment[i]|"
+        r"\bcatalogo\s+(?:dei\s+)?procediment[i]\b|"
+        r"\belenco\s+(?:dei\s+)?procediment[i]\b|"
+        r"\bschede?\s+procediment[i]\b|"
+        r"\bprocedimenti\s+amministrativi\b|"
+        r"\btipolog(?:ia|ie)\b|"
+        r"\bprocedur[ae]\b",
+        re.IGNORECASE
+    )
+    urls = []
+    for a in soup.find_all("a", href=True):
+        t = a.get_text(" ", strip=True)
+        if RX_TIP.search(t):
+            urls.append(urljoin(base_url, a["href"]))
+
+    
+    seen, out = set(), []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+
+    
+    def _depth(u):
+        p = urlparse(u).path.rstrip("/")
+        return (p.count("/"), len(p))
+    out.sort(key=_depth, reverse=True)
+    return out
 async def estrai_info_da_comune(comune):
     base_url = comune.strip()
     risultati = []
     visitati = set()
+
+    
+    async def doppio_hop_attivita_procedimenti(link_trasp, soup_tr, crawler):
+   
+           
+            rx_att = r"attivit[aà]\s*e\s*procediment[i]|procediment[i]\s*e\s*attivit[aà]"
+            link_att = trova_link_regex(soup_tr, rx_att, link_trasp)
+            if link_att:
+                return link_att
+
+            
+            inner_list = trova_inner_trasparenze_ordinate(soup_tr, link_trasp)
+
+            
+            inner_list = [u for u in inner_list if u != link_trasp]
+
+            for inner in inner_list:
+                try:
+                    html_tr2 = await crawler.arun(inner, extraction_strategy=RegexExtractionStrategy(timeout=30000))
+                    html_tr2 = normalizza_output(html_tr2)
+                    soup_tr2 = BeautifulSoup(html_tr2["text"], "html.parser")
+
+                    
+                    link_att_inner = trova_link_regex(soup_tr2, rx_att, inner)
+                    if link_att_inner:
+                        return link_att_inner
+
+                except Exception as e:
+                    print(f"[ATT] Errore aprendo inner trasparenza {inner}: {e}")
+
+            
+            patterns_pw = [
+                r"\battivit[aà]\b",
+                r"\bprocediment[i]\b",
+                r"attivit[aà].*procediment[i]|procediment[i].*attivit[aà]",
+                r"\btipolog(ia|ie)\b",
+                r"\bnormativa\b|\batti\s+normativi\b",
+            ]
+            try:
+                link_att_pw = await fallback_playwright_trova_link_multipli(link_trasp, patterns_pw)
+                if link_att_pw:
+                    return link_att_pw
+            except Exception as e:
+                print(f"[ATT] Playwright corrente fallito: {e}")
+
+            
+            for inner in inner_list:
+                try:
+                    link_att_pw_inner = await fallback_playwright_trova_link_multipli(inner, patterns_pw)
+                    if link_att_pw_inner:
+                        return link_att_pw_inner
+                except Exception as e:
+                    print(f"[ATT] Playwright inner {inner} fallito: {e}")
+
+            
+            return None
+
+    async def doppio_hop_tipologie(link_att, soup_att, crawler):
+        
+        link_tip = trova_link_regex(
+            soup_att,
+            r"tipolog(?:ia|ie)\s*(?:dei|de|di)?\s*procediment[i]|catalogo\s+(?:dei\s+)?procediment[i]|"
+            r"elenco\s+(?:dei\s+)?procediment[i]|schede?\s+procediment[i]|procedimenti\s+amministrativi|"
+            r"\btipolog(?:ia|ie)\b|\bprocedur[ae]\b",
+            link_att
+        )
+        if not link_tip:
+            patterns = [
+                r"\btipolog(?:ia|ie)\s*(?:dei|de|di)?\s*procediment[i]\b",
+                r"\bcatalogo\s+(?:dei\s+)?procediment[i]\b",
+                r"\belenco\s+(?:dei\s+)?procediment[i]\b",
+                r"\bschede?\s+procediment[i]\b",
+                r"\bprocedimenti\s+amministrativi\b",
+                r"\bprocedur[ae]\b",
+                r"\btipolog(?:ia|ie)\b",
+            ]
+            link_tip = await fallback_playwright_trova_link_multipli(link_att, patterns)
+
+        
+        if link_tip:
+            try:
+                pdf_links_global = []
+
+                
+                async for _, soup_tip_first in iter_pagination(link_tip, crawler, max_pages=1):
+                    inner_tip_list = _trova_tipologie_inner_links(soup_tip_first, link_tip)
+                
+                inner_tip_list = [u for u in inner_tip_list if u != link_tip]
+
+                
+                tipologie_da_visitare = inner_tip_list + [link_tip]
+
+                visitati_tip = set()
+                for tip_url in tipologie_da_visitare:
+                    if tip_url in visitati_tip:
+                        continue
+                    visitati_tip.add(tip_url)
+
+                    async for page_url, soup_tip in iter_pagination(tip_url, crawler, max_pages=50):
+                        
+                        pdf_links = [
+                            urljoin(page_url, a["href"])
+                            for a in soup_tip.find_all("a", href=True)
+                            if a["href"].lower().endswith(".pdf")
+                        ]
+                        print(f"[Tipologie] {page_url} -> PDF trovati: {len(pdf_links)}")
+                        pdf_links_global.extend(pdf_links)
+
+                        
+                        sotto_link = await crawl_sottosezioni_bfs(
+                            start_soup=soup_tip,
+                            start_url=tip_url,
+                            crawler=crawler,
+                            parole_chiave=PAROLE_CHIAVE,
+                            esclusi=esclusi,
+                            max_depth=3
+                        )
+                        print(f"[Tipologie] sottosezioni: raccolti {len(sotto_link)} elementi (PDF o link con parole chiave).")
+                        candidati.extend(sotto_link)
+
+                        
+                        candidati_kw_page = [
+                            (a.get_text(strip=True), urljoin(page_url, a["href"]))
+                            for a in soup_tip.find_all("a", href=True)
+                            if not esclusi.search(a["href"]) and any(
+                                p in a.get_text(strip=True).lower() for p in PAROLE_CHIAVE
+                            )
+                        ]
+                        print(f"[Tipologie] {page_url} -> KW: {len(candidati_kw_page)}")
+                        candidati.extend(candidati_kw_page)
+
+                
+                base_per_dyn = inner_tip_list[0] if inner_tip_list else link_tip
+                if not pdf_links_global:
+                    print("Provo Playwright per i PDF dinamici (Tipologie, pagina profonda se presente)…")
+                    pdf_links_global = await estrai_pdf_playwright(base_per_dyn)
+
+                for pdf_url in pdf_links_global:
+                    candidati.append(("PDF Procedimento", pdf_url))
+
+            except Exception as e:
+                print(f"Errore caricando Tipologie di Procedimento (multi-hop): {e}")
+        fallback_attivato = True
+
+        
+        return None
+   
 
     async with AsyncWebCrawler() as crawler:
         try:
             homepage = await crawler.arun(base_url, extraction_strategy=RegexExtractionStrategy(timeout=30000))
             homepage = normalizza_output(homepage)
             soup = BeautifulSoup(homepage["text"], "html.parser")
-            
 
-            link_trasp = trova_link_regex(soup, r"amministrazione\s+trasparente|trasparenza|trasparenti", base_url)
+            
+            link_trasp = trova_link_trasparenza_principale(
+                soup,
+                r"amministrazione\s+trasparente|trasparenza|trasparenti",
+                base_url
+            )
             if not link_trasp:
                 link_amministrazione = trova_link_regex(soup, r"\bamministrazione\b", base_url)
                 if link_amministrazione:
                     html_ammin = await crawler.arun(link_amministrazione, extraction_strategy=RegexExtractionStrategy(timeout=30000))
                     html_ammin = normalizza_output(html_ammin)
                     soup_ammin = BeautifulSoup(html_ammin["text"], "html.parser")
-                    link_trasp = trova_link_regex(
-                        soup_ammin,
-                        r"amministrazione\s+trasparente|trasparenza|trasparenti",
-                        link_amministrazione
-                    ) or link_amministrazione
+                    link_trasp = (
+                        trova_link_regex(soup_ammin, r"amministrazione\s+trasparente|trasparenza|trasparenti", link_amministrazione)
+                        or link_amministrazione
+                    )
                 else:
-                    link_trasp = base_url
+                    link_trasp = base_url 
 
+            
             html_trasp = await crawler.arun(link_trasp, extraction_strategy=RegexExtractionStrategy(timeout=30000))
             html_trasp = normalizza_output(html_trasp)
             soup_tr = BeautifulSoup(html_trasp["text"], "html.parser")
 
             candidati = []
-
-            link_att = trova_link_regex(
-                soup_tr,
-                r"attivit[aà]\s+e\s+procediment[i]|procedimenti\s+e\s+attivit[aà]",
-                link_trasp
-            )
-
             fallback_attivato = False
+
+            
+            link_att = await doppio_hop_attivita_procedimenti(link_trasp, soup_tr, crawler)
 
             if link_att:
                 html_att = await crawler.arun(link_att, extraction_strategy=RegexExtractionStrategy(timeout=30000))
                 html_att = normalizza_output(html_att)
                 soup_att = BeautifulSoup(html_att["text"], "html.parser")
 
-                link_tip = trova_link_regex(
-                    soup_att,
-                    r"tipolog(ia|ie).*procediment[i]|procediment[i].*tipolog(ia|ie)|tipolog(ia|ie)",
-                    link_att
-                )
                 
+                link_tip = await doppio_hop_tipologie(link_att, soup_att, crawler)
 
                 if link_tip:
-                        try:
-                            html_tip = await crawler.arun(link_tip, extraction_strategy=RegexExtractionStrategy(timeout=30000))
-                            html_tip = normalizza_output(html_tip)
-                            soup_tip = BeautifulSoup(html_tip["text"], "html.parser")
+                    try:
+                        pdf_links_global = []
 
-                            # 1 Cerca PDF nella pagina tipologie
+                        
+                        async for page_url, soup_tip in iter_pagination(link_tip, crawler, max_pages=50):
+                            
                             pdf_links = [
-                                urljoin(link_tip, a["href"])
+                                urljoin(page_url, a["href"])
                                 for a in soup_tip.find_all("a", href=True)
-                                if a["href"].lower().endswith(".pdf") and not esclusi.search(a["href"])
+                                if a["href"].lower().endswith(".pdf")
                             ]
-                            print(f"Trovati {len(pdf_links)} link PDF nella pagina tipologie.")
-                            if not pdf_links:
-                                print("Provo Playwright per i PDF dinamici...")
-                                pdf_links = await estrai_pdf_playwright(link_tip)
+                            print(f"[Tipologie] {page_url} -> PDF trovati: {len(pdf_links)}")
+                            pdf_links_global.extend(pdf_links)
 
-                            for pdf_url in pdf_links:
-                                candidati.append(("PDF Procedimento", pdf_url))
+                            
+                            sotto_link = await crawl_sottosezioni_bfs(
+                                start_soup=soup_tip,
+                                start_url=link_tip,
+                                crawler=crawler,
+                                parole_chiave=PAROLE_CHIAVE,
+                                esclusi=esclusi,
+                                max_depth=3
+                            )
+                            print(f"[Tipologie] sottosezioni: raccolti {len(sotto_link)} elementi (PDF o link con parole chiave).")
+                            candidati.extend(sotto_link)
 
-                            # 2 Cerca sotto-link procedimenti amministrativi
-                            sotto_link = [
-                                urljoin(link_tip, a["href"])
+                            
+                            candidati_kw_page = [
+                                (a.get_text(strip=True), urljoin(page_url, a["href"]))
                                 for a in soup_tip.find_all("a", href=True)
-                                if (
-                                        re.search(r"procedimenti\s+amministrativi", a.get_text(strip=True).lower())
-                                        and not esclusi.search(a["href"])
-                                    )
+                                if not esclusi.search(a["href"]) and any(
+                                    p in a.get_text(strip=True).lower() for p in PAROLE_CHIAVE
+                                )
                             ]
+                            print(f"[Tipologie] {page_url} -> KW: {len(candidati_kw_page)}")
+                            candidati.extend(candidati_kw_page)
 
-                            print(f"Trovati {len(sotto_link)} sotto-link strutture/centrali/territoriali.")
+                        
+                        if not pdf_links_global:
+                            print("Provo Playwright per i PDF dinamici (Tipologie)...")
+                            pdf_links_global = await estrai_pdf_playwright(link_tip)
 
-                            # Variabile per controllare se ho trovato parole chiave nei sotto-link
-                            trovato_kw_sotto_link = False
+                        for pdf_url in pdf_links_global:
+                            candidati.append(("PDF Procedimento", pdf_url))
 
-                            # 3 Per ciascun sotto-link: cerca PDF e parole chiave
-                            for sl in sotto_link:
-                                try:
-                                    print(f"Scarico sotto-link: {sl}")
-                                    html_sub = await crawler.arun(sl, extraction_strategy=RegexExtractionStrategy(timeout=30000))
-                                    html_sub = normalizza_output(html_sub)
-                                    soup_sub = BeautifulSoup(html_sub["text"], "html.parser")
+                    except Exception as e:
+                        print(f"Errore caricando Tipologie di Procedimento: {e}")
+                        fallback_attivato = True
 
-                                    # 3.a Cerca PDF nel sotto-link
-                                    pdf_sub_links = [
-                                        urljoin(sl, a["href"])
-                                        for a in soup_sub.find_all("a", href=True)
-                                        if a["href"].lower().endswith(".pdf") and not esclusi.search(a["href"])
-                                    ]
-                                    print(f"Trovati {len(pdf_sub_links)} PDF nel sotto-link {sl}.")
-                                    for pdf_url in pdf_sub_links:
-                                        candidati.append(("PDF Procedimento", pdf_url))
+                else:
+                    
+                    print("[Info] Nessuna sezione 'Tipologie di procedimento'. Cerco comunque PDF/keyword in 'Attività e procedimenti'.")
+                    
+                    pdf_att = [
+                        urljoin(link_att, a["href"])
+                        for a in soup_att.find_all("a", href=True)
+                        if a["href"].lower().endswith(".pdf")
+                    ]
+                    for u in pdf_att:
+                        candidati.append(("PDF Procedimento", u))
 
-                                    # 3.b Cerca link con parole chiave nel sotto-link
-                                    candidati_sub_kw = [
-                                        (a.get_text(strip=True), urljoin(sl, a["href"]))
-                                        for a in soup_sub.find_all("a", href=True)
-                                        if not esclusi.search(a["href"]) and any(
-                                            p in a.get_text(strip=True).lower() for p in PAROLE_CHIAVE
-                                        )
-                                    ]
-                                    print(f"Trovati {len(candidati_sub_kw)} link con parole chiave nel sotto-link {sl}.")
-                                    if candidati_sub_kw:
-                                        trovato_kw_sotto_link = True
-                                    candidati.extend(candidati_sub_kw)
+                    
+                    candidati_kw_att = [
+                        (a.get_text(strip=True), urljoin(link_att, a["href"]))
+                        for a in soup_att.find_all("a", href=True)
+                        if not esclusi.search(a["href"]) and any(
+                            p in a.get_text(strip=True).lower() for p in PAROLE_CHIAVE
+                        )
+                    ]
+                    candidati.extend(candidati_kw_att)
 
-                                except Exception as e:
-                                    print(f"Errore caricando il sotto-link {sl}: {e}. Ignoro e continuo.")
-
-                            # 4 Solo se non ho trovato parole chiave nei sotto-link, cerca nella pagina tipologie
-                            if not trovato_kw_sotto_link:
-                                candidati_kw = [
-                                    (a.get_text(strip=True), urljoin(link_tip, a["href"]))
-                                    for a in soup_tip.find_all("a", href=True)
-                                    if not esclusi.search(a["href"]) and any(
-                                        p in a.get_text(strip=True).lower() for p in PAROLE_CHIAVE
-                                    )
-                                ]
-                                print(f"Trovati {len(candidati_kw)} link con parole chiave nella pagina tipologie.")
-                                candidati.extend(candidati_kw)
-                            else:
-                                print("Ho trovato parole chiave nei sotto-link, quindi salto la ricerca nella pagina principale.")
+                    
+                    if not pdf_att:
+                        print("Provo Playwright per i PDF dinamici (Attività e procedimenti)...")
+                        pdf_dyn = await estrai_pdf_playwright(link_att)
+                        for u in pdf_dyn:
+                            candidati.append(("PDF Procedimento", u))
+            else:
+                print ("Non ho trovato 'Attività e procedimenti': passo a Fallback esteso")
+                fallback_attivato = True
 
 
-
-
-                        except Exception as e:
-                            print(f"Errore caricando Tipologie di Procedimento: {e}")
-                            fallback_attivato = True
-
-            if fallback_attivato:
+            
+            if fallback_attivato and not candidati:
                 print("Esecuzione fallback: cerco in Documenti/Dati e Database Procedimenti")
                 link_doc = trova_link_regex(
                     soup_tr,
@@ -655,6 +1126,7 @@ async def estrai_info_da_comune(comune):
                 if link_doc:
                     html_doc = await crawler.arun(link_doc, extraction_strategy=RegexExtractionStrategy(timeout=30000))
                     html_doc = normalizza_output(html_doc)
+
                     if contiene_procedimenti_per_keyword(html_doc["text"], PAROLE_CHIAVE):
                         soup_doc = BeautifulSoup(html_doc["text"], "html.parser")
                         candidati = [
@@ -665,34 +1137,63 @@ async def estrai_info_da_comune(comune):
                             )
                         ]
 
+                
+                if not candidati:
+                    print("Fallback esteso: cerco sezioni con atti normativi, norme o procedure...")
+                    soup_finale = BeautifulSoup(html_trasp["text"], "html.parser")
+                    pattern_norme = re.compile(r"\b(norme|normativa|atti\s+normativi|procedure|procedura)\b", re.IGNORECASE)
+
+                    link_norme = None
+                    for a in soup_finale.find_all("a", href=True):
+                        testo = a.get_text(strip=True)
+                        if pattern_norme.search(testo):
+                            link_norme = urljoin(link_trasp, a["href"])
+                            print(f"Trovato link a sezione normativa: {link_norme}")
+                            break
+
+                    if link_norme:
+                        try:
+                            html_norme = await crawler.arun(link_norme, extraction_strategy=RegexExtractionStrategy(timeout=30000))
+                            html_norme = normalizza_output(html_norme)
+                            soup_norme = BeautifulSoup(html_norme["text"], "html.parser")
+
+                            candidati_norme = [
+                                (a.get_text(strip=True), urljoin(link_norme, a["href"]))
+                                for a in soup_norme.find_all("a", href=True)
+                                if not esclusi.search(a["href"]) and any(
+                                    p in a.get_text(strip=True).lower() for p in PAROLE_CHIAVE
+                                )
+                            ]
+                            print(f"Trovati {len(candidati_norme)} link con parole chiave nella sezione normativa.")
+                            candidati.extend(candidati_norme)
+                        except Exception as e:
+                            print(f"Errore accedendo alla sezione normativa: {e}")
+
+            
             for titolo, url_dettaglio in candidati:
                 if url_dettaglio in visitati:
                     continue
                 visitati.add(url_dettaglio)
 
                 try:
+                    if isinstance(titolo, str) and titolo.lower().startswith("pdf"):
+                        
+                        pass
+
                     if url_dettaglio.lower().endswith(".pdf"):
-                                print("Scarico PDF:", url_dettaglio)
-                                percorso_pdf = scarica_pdf_requests(url_dettaglio, comune)
-
-                                if percorso_pdf:
-                                    procedimenti =estrai_procedimenti_con_fallback(url_dettaglio, comune)
-
-                                    print(f"Trovati {len(procedimenti)} procedimenti nel PDF.")
-                                    risultati.extend(procedimenti)
-                                else:
-                                    print("PDF non scaricato correttamente, nessun procedimento aggiunto.")
-
-
-
+                        print("Scarico PDF:", url_dettaglio)
+                        percorso_pdf = scarica_pdf_requests(url_dettaglio, comune)
+                        if percorso_pdf:
+                            procedimenti = estrai_procedimenti_con_fallback(url_dettaglio, comune)
+                            print(f"Trovati {len(procedimenti)} procedimenti nel PDF.")
+                            risultati.extend(procedimenti)
+                        else:
+                            print("PDF non scaricato correttamente, nessun procedimento aggiunto.")
                     else:
                         
-                        dettaglio_html = await crawler.arun(
-                            url_dettaglio,
-                            extraction_strategy=RegexExtractionStrategy(timeout=30000)
-                        )
+                        dettaglio_html = await crawler.arun(url_dettaglio, extraction_strategy=RegexExtractionStrategy(timeout=30000))
                         dettaglio_html = normalizza_output(dettaglio_html)
-                        soup_det = BeautifulSoup(dettaglio_html["content"], "html.parser")
+                        soup_det = BeautifulSoup(dettaglio_html["text"], "html.parser")
                         main = soup_det.find("main") or soup_det.find("div", id="main") or soup_det
                         testo = main.get_text(" ", strip=True)
 
@@ -708,19 +1209,16 @@ async def estrai_info_da_comune(comune):
                             "Comune": comune
                         })
 
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.5)
 
                 except Exception as e:
                     print(f"Errore nel dettaglio {url_dettaglio}: {e}")
-
 
         except Exception as e:
             print(f"Errore generale per {comune}: {e}")
             traceback.print_exc()
 
     return risultati
-
-
 
 
 async def main():
