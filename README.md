@@ -25,10 +25,8 @@ Crawl4PA/
 ├── requirements.txt # Python dependencies
 ├── README.md # Project documentation
 │
-├── results/ # (To be created) Outputs and example results
-│ ├── csv/ # Extracted procedure tables
-│ ├── pdf/ # Sample downloaded PDFs
-│ └── logs/ # Execution logs
+├── results/                     # Evaluation results
+│   └── evaluation.xlsx          # Evaluation of section identification, procedure extraction, and legal enrichment
 │
 └── keywords/ # Keyword lists used for discovery and filtering
 └── keywords.txt
